@@ -48,7 +48,7 @@ This script will help you with the following:
 <p>To use the script just download it and run with sudo priviliges.</p>
 
 ```
-wget https://github.com/vjkolaventy/cis_hardening/cis_hardening.sh
+wget https://raw.githubusercontent.com/vjkolaventy/cis_hardening/refs/heads/main/cis_hardening.sh
 chmod +x cis_hardening.sh
 sudo ./cis_hardening.sh
 ```
