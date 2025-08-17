@@ -1,4 +1,4 @@
-<table width="100%" border="0" cell-spacing="0" cellpadding="10" align="center" bgcolor="#FFFFFF">
+<table width="100%" border="0" cell-spacing="0" cellpadding="10" align="center" bgcolor="#FFFFFF" style="border: none;">
   <tr align="center" bgcolor="#FFFFFF"><td colspan="3"><img align="center" src="https://github.com/user-attachments/assets/c469f501-b62c-4b0d-b46f-590dd4eab013" /></td></tr>
   <tr align="center" bgcolor="#FFFFFF">
     <td><img src="https://komarev.com/ghpvc/?username=vjkolaventy&label=+++Views:&color=orange&style=flat" alt="views" /></td>
@@ -43,7 +43,7 @@
 My personal preference is Debian netinst distribution. Install the server with just Openssh-server. Create the below following partitions and options for better hardening.
 
 <table>
-  <tr><b><td>Partition</td><td colspan="3" align="center">Options</td></b></tr>
+  <tr><th>Partition</th><th colspan="3" align="center">Options</th></tr>
   <tr><td></td><td align="center">nodev</td><td align="center">noexec</td><td align="center">nosuid</td></tr>
   <tr><td>/boot</td><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
   <tr><td>/dev</td><td align="center">&cross;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
@@ -80,5 +80,6 @@ sudo ./cis_hardening.sh
 ```
 
 <img width="1734" height="1991" alt="image" src="https://github.com/user-attachments/assets/564f33be-b755-43df-ba59-d702b5036d10" />
+
 </td></tr>
 </table>
