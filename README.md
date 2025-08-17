@@ -2,7 +2,7 @@
 <h2 align="center">CIS HARDENING SCRIPT FOR DEBIAN >= 12 AND UBUNTU >= 18.04</h2>
 
 ---
-<table width="100%" border="0" cell-spacing="0" cellpadding="10" align="center" style="border: none;">
+<table width="100%" border="0" cell-spacing="0" cellpadding="10" align="center" style="border: none; width: 100%;">
   <tr>
     <td><img src="https://komarev.com/ghpvc/?username=vjkolaventy&label=+++Views:&color=orange&style=flat" alt="views" /></td>
     <td><img src="https://img.shields.io/badge/%20%20Version-v1.0-green&style=flat" /></td>
@@ -44,7 +44,7 @@ This script will help you with the following:
 </p>
 
 ### USING THE SCRIPT
-**$\textcolor{red}{WARNING:}$** *This is script is meant to be run on a fresh install. Some options in script can potentially lock you out and make you system unusable. Be sure backup it up before running this script. You the script at your own risk!*
+**$\textcolor{red}{WARNING:}$** *This is script is meant to be run on a fresh install. Some options in script can potentially lock you out and make you system unusable. Be sure backup it up before running this script. Use the script at your own risk!*
 <p>To use the script just download it and run with sudo priviliges.</p>
 
 ```
