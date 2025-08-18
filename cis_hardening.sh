@@ -595,7 +595,7 @@ setup_fail2ban() {
     sudo cp /etc/fail2ban/jail.conf "$FAIL2BAN_FILE" || handle_error "Failed to create Fail2Ban local config"
     sudo sed -i "s/bantime  = 10m/bantime  = 30m/" "$FAIL2BAN_FILE" || handle_error "Failed to set Fail2Ban bantime"
     sudo sed -i "s/maxretry = 5/maxretry = 3/" "$FAIL2BAN_FILE" || handle_error "Failed to set Fail2Ban maxretry"
-    sudo sed -i '/DEFAULT/a\allowipv6 = no\nbantime = 3600\nfindtime = 600\nmaxretry = 5' "$FAIL2BAN_FILE" || handle_error "Failed to set Fail2Ban disable ipv6"
+    sudo sed -i '/^DEFAULT/a\allowipv6 = no\nbantime = 3600\nfindtime = 600\nmaxretry = 5' "$FAIL2BAN_FILE" || handle_error "Failed to set Fail2Ban disable ipv6"
     echo -e "\n[sshd]\nenabled = true\nport = ssh,sftp\nlogpath = %(sshd_log)s\nbackend = %(sshd_backend)s" | sudo tee -a "$FAIL2BAN_FILE" > /dev/null || handle_error "Failed to set Fail2Ban sshd log"
 
     sudo systemctl enable fail2ban || handle_error "Failed to enable Fail2Ban service"
