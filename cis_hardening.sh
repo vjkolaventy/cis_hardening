@@ -315,6 +315,7 @@ execute_actions() {
     $do_setup_2fa				&& actions+=(setup_2fa);                names+=("Setup Google 2FA authentication")
     $do_apply_misc				&& actions+=(apply_misc);               names+=("Apply miscellaneous CIS recommendations")
     $do_enable_updates			&& actions+=(enable_updates);           names+=("Enable automatic security updates")
+	$do_setup_lynix				&& actions+=(setup_lynis);		        names+=("Setup Lynis")
 
     local count=${#actions[@]}
 
