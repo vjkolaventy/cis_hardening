@@ -40,20 +40,21 @@
 </p>
 
 #### HARDENING TIPS
-My personal preference is Debian netinst distribution. Install the server with just Openssh-server. Create the below following partitions and options for better hardening.
+My personal preference is Debian netinst distribution. Install the server with just Openssh-server. Create partitions with the following options for better hardening. (&check;=apply &cross;=dont apply) 
 
 <table>
   <tr><th>Partition</th><th colspan="3" align="center">Options</th></tr>
   <tr><td></td><td align="center">nodev</td><td align="center">noexec</td><td align="center">nosuid</td></tr>
-  <tr><td>/boot</td><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
-  <tr><td>/dev</td><td align="center">&cross;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
-  <tr><td>/dev/shm</td><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
-  <tr><td>/home</td><td align="center">&check;</td><td align="center">&cross;</td><td align="center">&check;</td></tr>
-  <tr><td>/run</td><td align="center">&check;</td><td align="center">&cross;</td><td align="center">&check;</td></tr>
-  <tr><td>/tmp</td><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
+  <tr><td>/</td><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
+  <tr><td>/boot</td><td align="center">&cross;</td><td align="center">&cross;</td><td align="center">&cross;</td></tr>
+  <tr><td>/home</td><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
   <tr><td>/var</td><td align="center">&check;</td><td align="center">&cross;</td><td align="center">&check;</td></tr>
   <tr><td>/var/log</td align="center"><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
   <tr><td>/var/log/audit</td><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
+  <tr><td>/dev</td><td align="center">&cross;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
+  <tr><td>/dev/shm</td><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
+  <tr><td>/run</td><td align="center">&check;</td><td align="center">&cross;</td><td align="center">&check;</td></tr>
+  <tr><td>/tmp</td><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
   <tr><td>/var/tmp</td><td align="center">&check;</td><td align="center">&check;</td><td align="center">&check;</td></tr>
 </table>
 
