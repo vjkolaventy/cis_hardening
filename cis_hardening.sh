@@ -960,7 +960,7 @@ apply_file_permissions() {
     if sudo grep -q "^umask" /etc/profile; then
         sudo sed -i "s/^umask.*/# &/" /etc/profile || handle_error "Failed to comment existing umask configuration in /etc/profile"
     fi
-    echo "\n# CIS Hardening\numask 077" | sudo tee -a /etc/profile || handle_error "Failed to add umask 077 to /etc/profile"
+    echo -e "\n# CIS Hardening\numask 077" | sudo tee -a /etc/profile || handle_error "Failed to add umask 077 to /etc/profile"
     CHANGED_FILES+=("/etc/profile")
     log "true" "Added umask 077 to /etc/profile"
 
