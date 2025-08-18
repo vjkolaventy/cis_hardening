@@ -1153,7 +1153,7 @@ setup_2fa() {
         install_package "libpam-google-authenticator"
         backup_file "/etc/pam.d/sshd"
         echo -e "\n# Google 2FA Authentication" | sudo tee -a /etc/pam.d/sshd > /dev/null
-        echo "auth required pam_google_authenticator.so" | sudo tee -a /etc/pam.d/sshd > /dev/null || handle_error "Failed to add Google Authenticator to /etc/pam.d/sshd"
+        echo "auth required pam_google_authenticator.so nullok" | sudo tee -a /etc/pam.d/sshd > /dev/null || handle_error "Failed to add Google Authenticator to /etc/pam.d/sshd"
         backup_file "/etc/ssh/sshd_config"
         if ! grep -q "^ChallengeResponseAuthentication" /etc/ssh/sshd_config; then
             echo "ChallengeResponseAuthentication yes" | sudo tee -a /etc/ssh/sshd_config > /dev/null || handle_error "Failed to enable ChallengeResponseAuthentication"
