@@ -41,6 +41,8 @@ CUSTOM_SYSCTL_FILE="/etc/sysctl.d/10_cis_hardening_sysctl.conf"
 CHKROOTKIT_FILE="/etc/chkrootkit/chkrootkit.conf"
 GRUB_FILE="/etc/default/grub"
 UFW_FILE="/etc/default/ufw"
+NFT_FILE="/etc/modules-load.d/cis_netfilter.conf" # netfilter modules files
+LOCK_MODULES_SERVICE_FILE="/etc/systemd/system/lock-modules.service" # to lock kernel modules after loading required modules
 PWQUALITY_FILE="/etc/security/pwquality.conf"
 PAM_PWD_FILE="/etc/pam.d/common-password"
 BACKUP_PATH="/root/cis_hardening"
@@ -232,6 +234,7 @@ remove_old_config() {
     fi
 }
 
+# Function to monitor changes files
 update_changed_files() {
     if ! [[ " ${CHANGED_FILES[*]}" =~ " $1 " ]]; then
         CHANGED_FILES+=("$1")
@@ -535,7 +538,7 @@ setup_firewall() {
 
     read -p "Do you want to open custom ports? (y/N): " open_ports
     case "$open_ports" in
-    [Yy]* | "")
+    [Yy]* )
         while true; do
             read -p "${CYAN}Enter valid port number (1-65535) to open or enter 0 to finish: ${NC}" port_number
             if [ "$port_number" -eq 0 ]; then
@@ -545,7 +548,7 @@ setup_firewall() {
             if is_valid_port "$port_number"; then
                 read -p "${LTCYAN}Do you want to open port ${port_number}? (y/N): ${NC}" confirm
                 case "$confirm" in
-                [Yy]*)
+                [Yy]* )
                     restart_port_selection=false
 
                     # Loop to select protocol (can cancel and restart port)
@@ -575,7 +578,7 @@ setup_firewall() {
                                 restart_port_selection=true
                                 break # Exit select only
                                 ;;
-                            *)
+                            * )
                                 echo -e "${RED}Invalid selection. Please choose a valid protocol.${NC}"
                                 ;;
                             esac
@@ -587,7 +590,7 @@ setup_firewall() {
                         fi
                     done
                     ;;
-                *)
+                * )
                     echo "Skipping port ${port_number}"
                     ;;
                 esac
@@ -596,7 +599,7 @@ setup_firewall() {
             fi
         done
         ;;
-    *)
+    * )
         log "true" "Skipping custom ports"
         ;;
     esac
@@ -613,6 +616,50 @@ setup_firewall() {
         esac
     fi
 
+    local val=$(cat /proc/sys/kernel/modules_disabled 2>/dev/null || echo 0)
+    if [[ "$val" -eq 1 ]]; then
+        nft_modules=(
+            ip_tables
+            iptable_filter
+            iptable_nat
+            ip6_tables
+            nf_conntrack
+            nf_defrag_ipv4
+            nf_defrag_ipv6
+        )
+        if [ -f "$NFT_FILE" ]; then
+            sudo truncate -s 0 "$NFT_FILE" || handle_error "Failed to delete lines in $NFT_FILE"
+        else
+            sudo touch $NFT_FILE || handle_error "Failed to create $NFT_FILE"
+        fi
+        printf "%s\n" "${nft_modules[@]}" | sudo tee -a $NFT_FILE > /dev/null || handle_error "Failed to add modules to $NFT_FILE"
+
+        # Generate systemd lock_module_service to disable loading kernel modules
+        local lock_service=(
+            "[Unit]"
+            "Description=Lock kernel modules after netfilter is loaded"
+            "After=network-pre.target systemd-modules-load.service ufw.service"
+            "Before=multi-user.target"
+            ""
+            "[Service]"
+            "Type=oneshot"  
+            "ExecStart=/bin/sh -c \"echo 1 > /proc/sys/kernel/modules_disabled\""
+
+            "[Install]"
+            "WantedBy=multi-user.target"
+        )
+        if [ -f "$LOCK_MODULES_SERVICE_FILE" ]; then
+            sudo truncate -s 0 "$LOCK_MODULES_SERVICE_FILE"
+        else
+            sudo touch "$LOCK_MODULES_SERVICE_FILE"
+        fi
+        printf "%s\n" "${lock_service[@]}" | sudo tee "$LOCK_MODULES_SERVICE_FILE" > /dev/null || handle_error "Failed to create $LOCK_MODULES_SERVICE_FILE"
+
+        sudo systemctl daemon-reexec
+        sudo systemctl enable lock-modules.service
+        log "true" "Create systemd lock_modules.service"
+    fi
+    
     sudo ufw logging on || handle_error "Failed to enable UFW logging"
     sudo ufw --force enable || handle_error "Failed to enable UFW"
     log "true" "Firewall configured and enabled"
@@ -633,6 +680,7 @@ setup_fail2ban() {
         "sendername = Fail2Ban"
         "destemail = $EMAIL"
     )
+
     local sshd_config=(
         ""
         "[sshd]"
@@ -640,6 +688,7 @@ setup_fail2ban() {
         "port = ssh,sftp"
         "backend = %(sshd_backend)s"
     )
+
     if ! dpkg -l | grep -q "fail2ban"; then
         install_package "fail2ban"
         if ! dpkg -l | grep -q "rsyslog"; then
@@ -653,6 +702,7 @@ setup_fail2ban() {
         sudo rm -f /var/lib/fail2ban/fail2ban.sqlite3 || handle_error "Failed to delete Fail2Ban database"
         backup_file "$FAIL2BAN_FILE"
     fi
+
     add_header "$FAIL2BAN_FILE"
     printf "%s\n" "${default_config[@]}" | sudo tee -a "$FAIL2BAN_FILE" || handle_error "Failed to add default config to $FAIL2BAN_FILE"
     printf "%s\n" "${sshd_config[@]}" | sudo tee -a "$FAIL2BAN_FILE" || handle_error "Failed to add sshd config to $FAIL2BAN_FILE"
@@ -789,6 +839,7 @@ setup_auditd() {
     for rule in "${audit_rules[@]}"; do
         echo "$rule" | sudo tee -a /etc/audit/rules.d/audit.rules >/dev/null || handle_error "Failed to add audit rule: $rule"
     done
+    
     update_changed_files "/etc/audit/rules.d/audit.rules"
     sudo sed -i "s/^action_mail_acct.*/action_mail_acct = $EMAIL/" /etc/audit/auditd.conf || handle_error "Failed to update email in auditd.conf"
     sudo systemctl enable auditd || handle_error "Failed to enable auditd service"
@@ -804,9 +855,11 @@ setup_chkrootkit() {
     else
         log "false" "ChkRootKit is already installed"
     fi
+    
     if ! grep -q -w "RUN_DAILY=\"true\"" "$CHKROOTKIT_FILE"; then
         sudo sed -i "s/^RUN_DAILY=\"true\"" "$CHKROOTKIT_FILE" || handle_error "Failed to set chkrootkit to run daily"
     fi
+    
     sudo chmod 640 "$CHKROOTKIT_FILE"
     log "true" "ChkRootKit setup is complete"
 }
@@ -862,9 +915,10 @@ configure_sysctl() {
     remove_old_config "$context" "$SYSCTL_FILE"
     sudo rm "$CUSTOM_SYSCTL_FILE"
 
-    # Add system hardening settings to sysctl.conf
+    # Add header to sysctl.conf
     add_header "$context" "$SYSCTL_FILE"
     add_header "$context" "$CUSTOM_SYSCTL_FILE"
+    
     for setting in "${sysctl_config[@]}"; do
         if [[ "$setting" =~ ^[a-zA-Z0-9._-]+[[:blank:]]*=[[:blank:]]*[0-9]+$ ]]; then
             local key=${setting%%=*}
@@ -878,6 +932,8 @@ configure_sysctl() {
             echo "Bad systctl parameter - skipping $setting"
         fi
     done
+    
+    # Add footer to sysctl.conf
     add_footer "$context" "$SYSCTL_FILE"
     add_footer "$context" "$CUSTOM_SYSCTL_FILE"
 
@@ -920,7 +976,6 @@ configure_ssh() {
         "MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
         "MaxAuthTries 3"
         "MaxSessions 3"
-        "MaxSessions 2"
         "MaxStartups 10:30:100"
         "PermitEmptyPasswords no"
         "PermitRootLogin no"
@@ -1226,6 +1281,7 @@ secure_boot() {
     else
         log "false" "/etc/default/grub not found. Skipping kernel parameter modifications."
     fi
+    
     update_changed_files "/etc/default/grub"
     log "true" "Boot settings secured"
 }
@@ -1233,6 +1289,7 @@ secure_boot() {
 # Function to setup Google 2FA
 setup_2fa() {
     log "true" "Setting up Google 2FA Authentication"
+    
     if ! dpkg -l | grep -q "libpam-google-authenticator"; then
         install_package "libpam-google-authenticator"
         backup_file "/etc/pam.d/sshd"
@@ -1246,6 +1303,7 @@ setup_2fa() {
     else
         log "false" "Google 2FA is already installed on your system"
     fi
+    
     update_changed_files "/etc/pam.d/sshd"
     update_changed_files "/etc/ssh/sshd_config"
     log "true" "Google 2FA authentication is enabled. Please run google-authenticator in your next login to enable 2FA"
@@ -1295,10 +1353,11 @@ apply_misc() {
     log "true" "Enabled persistent storage for journald"
 
     log "true" "Disabling core dumps"
-    echo -e "soft\tcore\t0\nhard\tcore\0" | sudo tee -a /etc/security/limits.conf
+    echo -e "*\tsoft\tcore\t0\n*\thard\tcore\t0" | sudo tee -a /etc/security/limits.conf
 
     update_changed_files "/etc/issue"
     update_changed_files "/etc/issue.net"
+    update_changed_files "/etc/ssh/ssh-banner"
     update_changed_files "/etc/systemd/journald.conf"
     update_changed_files "/etc/security/limits.conf"
 
@@ -1409,7 +1468,7 @@ main() {
             fi
         done
         ;;
-    *)
+    * )
         echo -e "${YELLOW}Leaving default address for reporting security events.${NC}\n"
         ;;
     esac
@@ -1421,6 +1480,7 @@ main() {
         sudo rm $LOG_FILE
     fi
 
+    # Run questionnaire to get user selection
     while true; do
         questionnaire
         show_selection_summary
@@ -1446,6 +1506,7 @@ main() {
     else
         echo -e "${YELLOW}No files have been changed by this script.\n\n${NC}"
     fi
+    
     echo -e "$(tput blink)${BOLD}${RED}\nPlease reboot the system\n${NC}${NORMAL}"
 }
 
