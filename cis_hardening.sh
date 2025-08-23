@@ -22,21 +22,27 @@ VERSION="1.0"
 VERBOSE=false
 COPYRIGHT=$(echo -e "\u00A9")
 LOG_FILE="/var/log/cis_hardening/cis_hardening.log"
- SCRIPT_NAME=$(basename "$0")
+SCRIPT_NAME=$(basename "$0")
 HEADER="# Aureum CIS Hardening - Start"
 FOOTER="# Aureum CIS Hardening - End"
+EMAIL="root"
+EMAIL_REGEX='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,20}$'
 
 # Config files
 CHANGED_FILES=()
 MODULES_FILE="/etc/modprobe.d/cis_hardening.conf"
 FAIL2BAN_FILE="/etc/fail2ban/jail.local"
+AIDE_FILE="/etc/default/aide"
 SSHD_FILE="/etc/ssh/sshd_config"
-CUSTOM_SSHD_FILE="/etc/ssh/sshd_config.d/99_cis_hardening_sshd.conf"
+CUSTOM_SSHD_FILE="/etc/ssh/sshd_config.d/10_cis_hardening_sshd.conf"
 PAM_SSHD_FILE="/etc/pam.d/sshd"
 SYSCTL_FILE="/etc/sysctl.conf"
-CUSTOM_SYSCTL_FILE="/etc/sysctl.d/99_cis_hardening_sysctl.conf"
+CUSTOM_SYSCTL_FILE="/etc/sysctl.d/10_cis_hardening_sysctl.conf"
+CHKROOTKIT_FILE="/etc/chkrootkit/chkrootkit.conf"
 GRUB_FILE="/etc/default/grub"
 UFW_FILE="/etc/default/ufw"
+NFT_FILE="/etc/modules-load.d/cis_netfilter.conf" # netfilter modules files
+LOCK_MODULES_SERVICE_FILE="/etc/systemd/system/lock-modules.service" # to lock kernel modules after loading required modules
 PWQUALITY_FILE="/etc/security/pwquality.conf"
 PAM_PWD_FILE="/etc/pam.d/common-password"
 BACKUP_PATH="/root/cis_hardening"
@@ -92,51 +98,61 @@ function print_centered {
     declare -i TERM_COLS="$(tput cols)"
     declare -i str_len="${#1}"
     [[ $str_len -ge $TERM_COLS ]] && {
-        echo "$1";
+        echo "$1"
         return
     }
-    declare -i filler_len="$(( (TERM_COLS - str_len) / 2 ))"
+    declare -i filler_len="$(((TERM_COLS - str_len) / 2))"
     [[ $# -ge 2 ]] && ch="${2:0:1}" || ch=" "
     filler=""
-    for (( i = 0; i < filler_len; i++ )); do
+    for ((i = 0; i < filler_len; i++)); do
         filler="${filler}${ch}"
     done
     printf "%s%s%s" "$filler" "$1" "$filler"
-    [[ $(( (TERM_COLS - str_len) % 2 )) -ne 0 ]] && printf "%s" "${ch}"
+    [[ $(((TERM_COLS - str_len) % 2)) -ne 0 ]] && printf "%s" "${ch}"
     printf "\n"
     return 0
 }
 
 # Function to check system requirements
 check_requirements() {
-    # Check if lsb_release command is available
-    if ! command -v lsb_release &> /dev/null; then
-        echo -e "${BOLD}${RED}Error! lsb_release command to run this script not found."
+    # --- Get OS information ---
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        os_name="$ID"            # debian / ubuntu
+        os_version="$VERSION_ID" # e.g. 12, 20.04, 22.04
+    else
+        echo "Error: /etc/os-release not found"
         exit 1
     fi
-    # Get OS release name and version
-    local os_name=$(lsb_release -si 2)
-    local os_version=$(lsb_release -sr 2)
-    # Allow to run script if OS is Ubuntu or Debian
-    if [[ "$os_name" != "Ubuntu" && "$os_name" != "Debian" ]]; then
-        echo -e "${BOLD}${RED}Error! This script is designed for Ubuntu or Debian-based systems. Detected OS: $os_name."
+    # Normalize os_name
+    case "$os_name" in
+    debian | Debian) os_name="Debian" ;;
+    ubuntu | Ubuntu) os_name="Ubuntu" ;;
+    *)
+        echo "Unsupported OS: $os_name $os_version"
         exit 1
+        ;;
+    esac
+    # --- Check version requirements ---
+    if [[ "$os_name" == "Ubuntu" ]]; then
+        if dpkg --compare-versions "$os_version" lt "18.04"; then
+            echo "This script requires Ubuntu 18.04 or later. Detected: $os_name $os_version"
+            exit 1
+        fi
+    elif [[ "$os_name" == "Debian" ]]; then
+        if dpkg --compare-versions "$os_version" lt "12"; then
+            echo "This script requires Debian 12.0 or later. Detected: $os_name $os_version"
+            exit 1
+        fi
     fi
-    # Check if OS versions are valid - Ubuntu > 18.04 and Debian > 12.0
-	if [[ "$os_name" == "Ubuntu" && $( echo "$os_version" "18.04" | awk '{print ($1 < $2)}' ) -eq 1 ]]; then
-		echo "This script requires Ubuntu 18.04 or later. Detected: $os_name $os_version."
-        exit 1
-	elif [[ "$os_name" == "Debian" && $( echo "$os_version" "12.0" | awk '{print ($1 < $2)}' ) -eq 1 ]]; then
-		echo "This script requires Debian 12 or later. Detected: $os_name $os_version."
-        exit 1
-	fi
     log "true" "System requirements check passed! OS Detected: ${LTCYAN}$os_name $os_version${NC}"
 }
 
 # Function to check permissions to run script
 check_permissions() {
     # Check if sudo is installed
-    if ! command -v "sudo" > /dev/null; then
+    if ! command -v "sudo" >/dev/null; then
         echo -e "$(tput blink)${BOLD}${RED}Please install sudo and run the script with sudo privileges!\n\n${NC}"
         exit 1
     fi
@@ -154,22 +170,55 @@ check_permissions() {
 }
 
 # Function to log script messages
+# log() {
+#     if $1; then
+#         local message="${NC}$(date '+%Y-%m-%d %H:%M:%S'): ${GREEN}$2${NC}"
+#     else
+#         local message="${NC}$(date '+%Y-%m-%d %H:%M:%S'): ${RED}Warning! $2${NC}"
+#     fi
+#     if ! [ -e "$LOG_FILE" ]; then
+#         sudo mkdir -p "$(dirname $LOG_FILE)"
+#     fi
+#     if ! [ -f "$LOG_FILE" ]; then
+#         sudo touch "$LOG_FILE"
+#     fi
+#     echo "$message" | sudo tee -a "$LOG_FILE" >/dev/null
+#     echo -e "$message"
+# }
+
+# Function to log messages
 log() {
-    if $1; then
-        local message="${NC}$(date '+%Y-%m-%d %H:%M:%S'): ${LTGREEN}$2${NC}"
-    else
-        local message="${NC}$(date '+%Y-%m-%d %H:%M:%S'): ${LTRED}Warning! $2${NC}"
-    fi
-    echo "$message" | sudo tee -a "$LOG_FILE" > /dev/null
-    echo -e "$message"
+    local status="$1" message="$2"
+    local color=$([[ "$status" == "true" ]] && echo "$GREEN" || echo "$RED")
+    local prefix=$([[ "$status" == "true" ]] && echo "" || echo "Warning! ")
+    local msg="$(date '+%Y-%m-%d %H:%M:%S'): ${color}${prefix}${message}${NC}"
+    sudo mkdir -p "$(dirname "$LOG_FILE")" || return 1
+    [[ ! -f "$LOG_FILE" ]] && sudo touch "$LOG_FILE"
+    echo -e "$msg" | sudo tee -a "$LOG_FILE" >/dev/null
+    echo -e "$msg"
 }
 
 # Function for error handling
+# handle_error() {
+#     local message="$(date '+%Y-%m-%d %H:%M:%S'): ${BOLD}${RED}Error!${NORMAL} ${LTCYAN}$2${NC}"
+#     if ! [ -f "$LOG_FILE" ]; then
+#         sudo touch "$LOG_FILE"
+#     fi
+#     echo "$message" | sudo tee -a "$LOG_FILE" >/dev/null
+#     echo -e "$message\n"
+#     false
+# }
+
+# Function for error handling
 handle_error() {
-    local message="$(date '+%Y-%m-%d %H:%M:%S'): ${BOLD}${RED}Error!${NORMAL} ${LTCYAN}$2${NC}"
-    echo "$message" | sudo tee -a "$LOG_FILE" > /dev/null
-    echo -e "$message\n"
-    false
+    log "false" "Error: $1"
+    local answer
+    read -p "Do you want to continue [y/N]? " answer
+    case $answer in
+        [Nn]* | "")
+            exit 1
+        ;;
+    esac
 }
 
 # Function to be executed when Ctrl+C is pressed
@@ -183,32 +232,26 @@ cleanup() {
 
 # Function to add configuration header
 add_header() {
-    local context="$1"
-    local file="$2"
-    local header="# Aureum CIS Hardening - $context - Start"
-    echo -e "\n$header" | sudo tee -a "$file" > /dev/null || handle_error "Failed to added header to configuration"
+    local context="$1" file="$2"
+    echo -e "\n$HEADER - $context" | sudo tee -a "$file" >/dev/null || handle_error "Failed to added header to configuration"
 }
 
 # Function to add configuration footer
 add_footer() {
-    local context="$1"
-    local file="$2"
-    local footer="# Aureum CIS Hardening - $context - End"
-    echo -e "$footer" | sudo tee -a "$file"  > /dev/null || handle_error "Failed to added footer to configuration"
+    local context="$1" file="$2"
+    echo -e "$FOOTER - $context" | sudo tee -a "$file" >/dev/null || handle_error "Failed to added footer to configuration"
 }
 
 # Function to remove previous configuration
 remove_old_config() {
-    local context="$1"
-    local file="$2"
-    local header="# Aureum CIS Hardening - $context - Start"
-    local footer="# Aureum CIS Hardening - $context - End"
-    if sudo grep -q -E "$header" "$file" > /dev/null; then
-        sudo sed -i "/^$header/,/^$footer/d" "$file" || handle_error "Failed to remove previous configuration"
+    local context="$1" file="$2"
+    if sudo grep -q -E "$HEADER" "$file" >/dev/null; then
+        sudo sed -i "/^$HEADER - $context/,/^$FOOTER - $context/d" "$file" || handle_error "Failed to remove previous configuration"
         sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$file" || handle_error "Failed to cleanup empty lines in $file"
     fi
 }
 
+# Function to monitor changes files
 update_changed_files() {
     if ! [[ " ${CHANGED_FILES[*]}" =~ " $1 " ]]; then
         CHANGED_FILES+=("$1")
@@ -218,7 +261,7 @@ update_changed_files() {
 # Function to let use select actions
 questionnaire() {
     echo -e "${BOLD}${ORANGE}Please select following system hardening options${NC}${NORMAL}"
-    echo -e "$${ITALIC}{LTCYAN}" > /dev/null
+    echo -e "$${ITALIC}{LTCYAN}" >/dev/null
     ask_question "1. Remove unused default packages?" && do_remove_packages=true || do_remove_packages=false
     ask_question "2. Disable IPV6 if not in use?" && do_disable_ipv6=true || do_disable_ipv6=false
     ask_question "3. Disable unused kernel modules?" && do_disable_unused_modules=true || do_disable_unused_modules=false
@@ -230,7 +273,7 @@ questionnaire() {
     ask_question "9. Setup Chrony to synchronise system clock?" && do_setup_chrony=true || do_setup_chrony=false
     ask_question "10. Setup Advanced Intrusion Detection Environment (AIDE)?" && do_setup_aide=true || do_setup_aide=false
     ask_question "11. Setup Auditd for monitoring & logging security events?" && do_setup_auditd=true || do_setup_auditd=false
-    ask_question "12. Setup Rkhunter for rootkit scanning?" && do_setup_rkhunter=true || do_setup_rkhunter=false
+    ask_question "12. Setup Chkrootkit for rootkit scanning?" && do_setup_chkrootkit=true || do_setup_chkrootkit=false
     ask_question "13. Configure kernel hardening settings to sysctl?" && do_configure_sysctl=true || do_configure_sysctl=false
     ask_question "14. Configure hardening settings to SSH service?" && do_configure_ssh=true || do_configure_ssh=false
     ask_question "15. Apply recommended file & directory permissions?" && do_apply_file_permissions=true || do_apply_file_permissions=false
@@ -242,35 +285,35 @@ questionnaire() {
     ask_question "21. Apply miscellaneous security settings?" && do_apply_misc=true || do_apply_misc=false
     ask_question "22. Enable automatic updates?" && do_enable_updates=true || do_enable_updates=false
     ask_question "23. Setup Lynis for security auditing & vulnerbility detection?" && do_setup_lynis=true || do_setup_lynis=false
-    echo -e "${NORMAL}${NC}" > /dev/null
+    echo -e "${NORMAL}${NC}" >/dev/null
 }
 
 # Function to display summary of selected actions
 show_selection_summary() {
     echo -e "\n${BOLD}You have selected the following actions"
-    $do_remove_packages                && echo "✅ Remove unused default packages"         || echo "❌ Skip remove unused default packages"
-    $do_disable_ipv6                   && echo "✅ Disable IPV6 if not in use"             || echo "❌ Skip disable IPV6 if not in use"
-    $do_disable_unused_modules         && echo "✅ Disable unused kernel modules"          || echo "❌ Skip disable unused default kernel modules"
-    $do_disable_usb                    && echo "✅ Disable USB storage"                    || echo "❌ Skip disable USB storage"
-    $do_setup_firewall                 && echo "✅ Setup UFW firewall"                     || echo "❌ Skip setup UFW firewall"
-    $do_setup_fail2ban                 && echo "✅ Setup Fail2Ban"                         || echo "❌ Skip setup Fail2Ban"
-    $do_setup_clamav                   && echo "✅ Setup ClamAV antivirus"                 || echo "❌ Skip setup ClamAV antivirus"
-    $do_setup_apparmor                 && echo "✅ Setup AppArmor"                         || echo "❌ Skip setup AppArmor"
-    $do_setup_chrony                   && echo "✅ Setup Chrony"                           || echo "❌ Skip setup Chrony"
-    $do_setup_aide                     && echo "✅ Setup AIDE"                             || echo "❌ Skip setup AIDE"
-    $do_setup_auditd                   && echo "✅ Setup Auditd"                           || echo "❌ Skip setup AuditD"
-    $do_setup_rkhunter                 && echo "✅ Setup Rkhunter"                         || echo "❌ Skip setup Rkhunter"
-    $do_configure_sysctl               && echo "✅ Apply kernel hardening settings"        || echo "❌ Skip apply secure kernel settings"
-    $do_configure_ssh                  && echo "✅ Apply SSH hardening settings"           || echo "❌ Skip apply secure SSH settings"
-    $do_apply_file_permissions         && echo "✅ Fix file and directory permissions"     || echo "❌ Skip fix file and directory permissions"
-    $do_disable_root                   && echo "✅ Disable root login"                     || echo "❌ Skip disable root login"
-    $do_limit_su                       && echo "✅ Limit su (superuser) to wheel members"  || echo "❌ Skip limit su (superuser) to wheel members"
-    $do_configure_password             && echo "✅ Enforce strong passwords"               || echo "❌ Skip enforce strong passwords"
-    $do_secure_boot                    && echo "✅ Apply secure boot settings"             || echo "❌ Skip secure boot settings"
-    $do_setup_2fa                      && echo "✅ Setup Google 2FA authentication"        || echo "❌ Skip setup Google 2FA authentication"
-    $do_apply_misc                     && echo "✅ Apply miscellaneous security settings"  || echo "❌ Skip apply miscellaneous security settings"
-    $do_enable_updates                 && echo "✅ Enable automatic updates"               || echo "❌ Skip enable automatic updates"
-    $do_setup_lynis                    && echo "✅ Setup Lynis"                            || echo "❌ Skip setup Lynis"
+    $do_remove_packages && echo "✅ Remove unused default packages" || echo "❌ Skip remove unused default packages"
+    $do_disable_ipv6 && echo "✅ Disable IPV6 if not in use" || echo "❌ Skip disable IPV6 if not in use"
+    $do_disable_unused_modules && echo "✅ Disable unused kernel modules" || echo "❌ Skip disable unused default kernel modules"
+    $do_disable_usb && echo "✅ Disable USB storage" || echo "❌ Skip disable USB storage"
+    $do_setup_firewall && echo "✅ Setup UFW firewall" || echo "❌ Skip setup UFW firewall"
+    $do_setup_fail2ban && echo "✅ Setup Fail2Ban" || echo "❌ Skip setup Fail2Ban"
+    $do_setup_clamav && echo "✅ Setup ClamAV antivirus" || echo "❌ Skip setup ClamAV antivirus"
+    $do_setup_apparmor && echo "✅ Setup AppArmor" || echo "❌ Skip setup AppArmor"
+    $do_setup_chrony && echo "✅ Setup Chrony" || echo "❌ Skip setup Chrony"
+    $do_setup_aide && echo "✅ Setup AIDE" || echo "❌ Skip setup AIDE"
+    $do_setup_auditd && echo "✅ Setup Auditd" || echo "❌ Skip setup AuditD"
+    $do_setup_chkrootkit && echo "✅ Setup ChkRootKit" || echo "❌ Skip setup ChkRootKit"
+    $do_configure_sysctl && echo "✅ Apply kernel hardening settings" || echo "❌ Skip apply secure kernel settings"
+    $do_configure_ssh && echo "✅ Apply SSH hardening settings" || echo "❌ Skip apply secure SSH settings"
+    $do_apply_file_permissions && echo "✅ Fix file and directory permissions" || echo "❌ Skip fix file and directory permissions"
+    $do_disable_root && echo "✅ Disable root login" || echo "❌ Skip disable root login"
+    $do_limit_su && echo "✅ Limit su (superuser) to wheel members" || echo "❌ Skip limit su (superuser) to wheel members"
+    $do_configure_password && echo "✅ Enforce strong passwords" || echo "❌ Skip enforce strong passwords"
+    $do_secure_boot && echo "✅ Apply secure boot settings" || echo "❌ Skip secure boot settings"
+    $do_setup_2fa && echo "✅ Setup Google 2FA authentication" || echo "❌ Skip setup Google 2FA authentication"
+    $do_apply_misc && echo "✅ Apply miscellaneous security settings" || echo "❌ Skip apply miscellaneous security settings"
+    $do_enable_updates && echo "✅ Enable automatic updates" || echo "❌ Skip enable automatic updates"
+    $do_setup_lynis && echo "✅ Setup Lynis" || echo "❌ Skip setup Lynis"
 }
 
 # Function to ask questions
@@ -282,9 +325,9 @@ ask_question() {
         read -p "$question ($default/n): " answer
         answer=${answer:-$default}
         case "${answer,,}" in
-            y|yes) return 0 ;;
-            n|no) return 1 ;;
-            *) echo "Please answer Y or N." ;;
+        y | yes) return 0 ;;
+        n | no) return 1 ;;
+        *) echo "Please answer Y or N." ;;
         esac
     done
 }
@@ -293,42 +336,65 @@ execute_actions() {
     local actions=()
     local names=()
 
-    $do_remove_packages		    && actions+=(remove_packages);          names+=("Remove unused packages")
-    $do_disable_ipv6			&& actions+=(disable_ipv6);             names+=("Disable IPV6")
-    $do_disable_unused_modules	&& actions+=(disable_unused_modules);   names+=("Disable unused modules")
-    $do_disable_usb			    && actions+=(disable_usb);              names+=("Disable USB")
-    $do_setup_firewall			&& actions+=(setup_firewall);           names+=("Setup Firewall")
-    $do_setup_fail2ban			&& actions+=(setup_fail2ban);           names+=("Setup Fail2Ban")
-    $do_setup_clamav			&& actions+=(setup_clamav);             names+=("Setup ClamAV")
-    $do_setup_apparmor			&& actions+=(setup_apparmor);           names+=("Setup AppArmor")
-    $do_setup_chrony			&& actions+=(setup_chrony);             names+=("Setup Chrony")
-    $do_setup_aide				&& actions+=(setup_aide);               names+=("Setup Aide")
-    $do_setup_auditd			&& actions+=(setup_auditd);             names+=("Setup Auditd")
-    $do_setup_rkhunter			&& actions+=(setup_rkhunter);           names+=("Setup Rkhunter")
-    $do_configure_sysctl		&& actions+=(configure_sysctl);         names+=("Configure sysctl for CIS")
-    $do_configure_ssh			&& actions+=(configure_ssh);            names+=("Configure SSH for CIS")
-    $do_apply_file_permissions	&& actions+=(apply_file_permissions);   names+=("Apply CIS file permissions")
-    $do_disable_root			&& actions+=(disable_root);             names+=("Disable root login")
-    $do_limit_su				&& actions+=(limit_su);                 names+=("Limit su to wheel members")
-    $do_configure_password		&& actions+=(configure_password);       names+=("Enforce strong passwords")
-    $do_secure_boot		    	&& actions+=(secure_boot);              names+=("Secure system boot")
-    $do_setup_2fa				&& actions+=(setup_2fa);                names+=("Setup Google 2FA authentication")
-    $do_apply_misc				&& actions+=(apply_misc);               names+=("Apply miscellaneous CIS recommendations")
-    $do_enable_updates			&& actions+=(enable_updates);           names+=("Enable automatic security updates")
-	$do_setup_lynix				&& actions+=(setup_lynis);		        names+=("Setup Lynis")
+    $do_remove_packages && actions+=(remove_packages)
+    names+=("Remove unused packages")
+    $do_disable_ipv6 && actions+=(disable_ipv6)
+    names+=("Disable IPV6")
+    $do_disable_unused_modules && actions+=(disable_unused_modules)
+    names+=("Disable unused modules")
+    $do_disable_usb && actions+=(disable_usb)
+    names+=("Disable USB")
+    $do_setup_firewall && actions+=(setup_firewall)
+    names+=("Setup Firewall")
+    $do_setup_fail2ban && actions+=(setup_fail2ban)
+    names+=("Setup Fail2Ban")
+    $do_setup_clamav && actions+=(setup_clamav)
+    names+=("Setup ClamAV")
+    $do_setup_apparmor && actions+=(setup_apparmor)
+    names+=("Setup AppArmor")
+    $do_setup_chrony && actions+=(setup_chrony)
+    names+=("Setup Chrony")
+    $do_setup_aide && actions+=(setup_aide)
+    names+=("Setup Aide")
+    $do_setup_auditd && actions+=(setup_auditd)
+    names+=("Setup Auditd")
+    $do_setup_chkrootkit && actions+=(setup_chkrootkit)
+    names+=("Setup ChkRootKit")
+    $do_configure_sysctl && actions+=(configure_sysctl)
+    names+=("Configure sysctl for CIS")
+    $do_configure_ssh && actions+=(configure_ssh)
+    names+=("Configure SSH for CIS")
+    $do_apply_file_permissions && actions+=(apply_file_permissions)
+    names+=("Apply CIS file permissions")
+    $do_disable_root && actions+=(disable_root)
+    names+=("Disable root login")
+    $do_limit_su && actions+=(limit_su)
+    names+=("Limit su to wheel members")
+    $do_configure_password && actions+=(configure_password)
+    names+=("Enforce strong passwords")
+    $do_secure_boot && actions+=(secure_boot)
+    names+=("Secure system boot")
+    $do_setup_2fa && actions+=(setup_2fa)
+    names+=("Setup Google 2FA authentication")
+    $do_apply_misc && actions+=(apply_misc)
+    names+=("Apply miscellaneous CIS recommendations")
+    $do_enable_updates && actions+=(enable_updates)
+    names+=("Enable automatic security updates")
+    $do_setup_lynis && actions+=(setup_lynis)
+    names+=("Setup Lynis")
 
     local count=${#actions[@]}
 
-    for ((i=0; i<count; i++)); do
+    for ((i = 0; i < count; i++)); do
         echo -e "\n=== Starting: ${LTRED}${names[$i]}${NC} ==="
         ${actions[$i]}
         if [[ $? -ne 0 ]]; then
             echo -e "${RED}❌ ${names[$i]} failed.${NC}"
-            if (( i == count - 1 )); then
+            if ((i == count - 1)); then
                 echo -e "${RED}This was the last action — exiting!${NC}"
                 exit 1
             fi
-            if ! ask_question "Do you want to continue with ${names[$i+1]}?" "Y"; then
+            if ! ask_question "Do you want to continue with ${names[$i + 1]}?" "Y"; then
                 echo -e "${RED}Stopping script!${NC}"
                 exit 1
             fi
@@ -366,7 +432,7 @@ backup_file() {
 # Function to remove unnecessary packages
 remove_packages() {
     log "true" "Removing unnecessary packages..."
-    sudo DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y telnetd nis yp-tools rsh-client rsh-redone-client xinetd || handle_error "Failed to remove some packages"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get remove --purge -y telnetd nis yp-tools rsh-client rsh-redone-client xinetd || log "false" "Failed to remove some packages"
     sudo apt-get autoremove -y || handle_error "Flushing apt packages failed"
     log "true" "Unnecessary packages removed"
 
@@ -389,9 +455,9 @@ disable_ipv6() {
             local key=${setting%% = *}
             if sudo grep -q -E "^${key}\b" "$SYSCTL_FILE" && ! sudo grep -q -E "^#.*${key}\b" "$SYSCTL_FILE"; then
                 sed -i -e "/^[[:space:]\xc2\xa0]*${key}\b/s/^/#&/" "$SYSCTL_FILE" || handle_error "Failed to comment existing setting $key"
-                log "Commented out existing $key in $SYSCTL_FILE"
+                log "true" "Commented out existing $key in $SYSCTL_FILE"
             fi
-            echo -e "$setting" | sudo tee -a "$SYSCTL_FILE" > /dev/null || handle_error "Failed to add $setting to $SYSCTL_FILE"
+            echo -e "$setting" | sudo tee -a "$SYSCTL_FILE" >/dev/null || handle_error "Failed to add $setting to $SYSCTL_FILE"
         else
             echo "Bad systctl parameter - skipping $setting"
         fi
@@ -429,7 +495,7 @@ disable_unused_modules() {
     remove_old_config "$context" "$MODULES_FILE"
     add_header "$context" "$MODULES_FILE"
     for module in "${modules[@]}"; do
-        echo -e "blacklist $module\ninstall $module /bin/true" | sudo tee -a "$MODULES_FILE" > /dev/null || handle_error "Failed to disable module: $module"
+        echo -e "blacklist $module\ninstall $module /bin/true" | sudo tee -a "$MODULES_FILE" >/dev/null || handle_error "Failed to disable module: $module"
     done
     add_footer "$context" "$MODULES_FILE"
     update_changed_files "$SYSCTL_FILE"
@@ -451,7 +517,7 @@ disable_usb() {
     remove_old_config "$context" "$MODULES_FILE"
     add_header "$context" "$MODULES_FILE"
     sudo modprobe -r usb_storage || handle_error "Failed to remove usb_storabe module"
-    echo -e "blacklist usb-storage\ninstall usb-storage /bin/true" | sudo tee -a $MODULES_FILE > /dev/null || handle_error "Disabling USB devices failed"
+    echo -e "blacklist usb-storage\ninstall usb-storage /bin/true" | sudo tee -a $MODULES_FILE >/dev/null || handle_error "Disabling USB devices failed"
     add_footer "$context" "$MODULES_FILE"
     update_changed_files "$MODULES_FILE"
     log "true" "Disabled USB devices & storage"
@@ -461,7 +527,7 @@ disable_usb() {
 is_valid_port() {
     local port="$1"
     # Check if it's a number and within the valid range
-    if [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1 && port <= 65535 )); then
+    if [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)); then
         return 0 # Valid port
     else
         return 1 # Invalid port
@@ -489,76 +555,76 @@ setup_firewall() {
 
     read -p "Do you want to open custom ports? (y/N): " open_ports
     case "$open_ports" in
-        [Yy]* )
-            while true; do
-                read -p "${CYAN}Enter valid port number (1-65535) to open or enter 0 to finish: ${NC}" port_number
-                if [ "$port_number" -eq 0 ]; then
-                    break
-                fi
+    [Yy]* )
+        while true; do
+            read -p "${CYAN}Enter valid port number (1-65535) to open or enter 0 to finish: ${NC}" port_number
+            if [ "$port_number" -eq 0 ]; then
+                break
+            fi
 
-                if is_valid_port "$port_number"; then
-                    read -p "${LTCYAN}Do you want to open port ${port_number}? (y/N): ${NC}" confirm
-                    case "$confirm" in
-                        [Yy]* )
-                            restart_port_selection=false
+            if is_valid_port "$port_number"; then
+                read -p "${LTCYAN}Do you want to open port ${port_number}? (y/N): ${NC}" confirm
+                case "$confirm" in
+                [Yy]* )
+                    restart_port_selection=false
 
-                            # Loop to select protocol (can cancel and restart port)
-                            while true; do
-                                echo -e "\n${CYAN}Choose protocol for port ${port_number} or select CANCEL to go back: ${NC}"
-                                select protocol in TCP UDP BOTH CANCEL; do
-                                    case "$protocol" in
-                                        TCP|UDP|BOTH)
-                                            read -p "${LTCYAN}Give a comment for this port or press Enter: ${NC}" comment
-                                            case "$protocol" in
-                                                TCP)
-                                                    sudo ufw allow "$port_number"/tcp comment "Allow ${comment}" || handle_error "Failed to allow TCP port"
-                                                ;;
-                                                UDP)
-                                                    sudo ufw allow "$port_number"/udp comment "Allow ${comment}" || handle_error "Failed to allow UDP port"
-                                                ;;
-                                                BOTH)
-                                                    sudo ufw allow "$port_number"/tcp comment "Allow ${comment}" || handle_error "Failed to allow TCP port"
-                                                    sudo ufw allow "$port_number"/udp comment "Allow ${comment}" || handle_error "Failed to allow UDP port"
-                                                ;;
-                                            esac
-                                            log "true" "Opened port ${port_number} (${protocol}) with comment: ${comment}"
-                                            break 2  # Exit both loops (protocol + while loop)
-                                        ;;
-                                        CANCEL)
-                                            echo -e "${YELLOW}Canceled protocol selection. Going back to port input...${NC}"
-                                            restart_port_selection=true
-                                            break  # Exit select only
-                                        ;;
-                                        *)
-                                            echo -e "${RED}Invalid selection. Please choose a valid protocol.${NC}"
-                                        ;;
-                                    esac
-                                done
+                    # Loop to select protocol (can cancel and restart port)
+                    while true; do
+                        echo -e "\n${CYAN}Choose protocol for port ${port_number} or select CANCEL to go back: ${NC}"
+                        select protocol in TCP UDP BOTH CANCEL; do
+                            case "$protocol" in
+                            TCP | UDP | BOTH)
+                                read -p "${LTCYAN}Give a comment for this port or press Enter: ${NC}" comment
+                                case "$protocol" in
+                                TCP)
+                                    sudo ufw allow "$port_number"/tcp comment "${comment}" || handle_error "Failed to allow TCP port"
+                                    ;;
+                                UDP)
+                                    sudo ufw allow "$port_number"/udp comment "${comment}" || handle_error "Failed to allow UDP port"
+                                    ;;
+                                BOTH)
+                                    sudo ufw allow "$port_number"/tcp comment "${comment}" || handle_error "Failed to allow TCP port"
+                                    sudo ufw allow "$port_number"/udp comment "${comment}" || handle_error "Failed to allow UDP port"
+                                    ;;
+                                esac
+                                log "true" "Opened port ${port_number} (${protocol}) with comment: ${comment}"
+                                break 2 # Exit both loops (protocol + while loop)
+                                ;;
+                            CANCEL)
+                                echo -e "${YELLOW}Canceled protocol selection. Going back to port input...${NC}"
+                                restart_port_selection=true
+                                break # Exit select only
+                                ;;
+                            * )
+                                echo -e "${RED}Invalid selection. Please choose a valid protocol.${NC}"
+                                ;;
+                            esac
+                        done
 
-                                # If canceled, go back to port number input
-                                if [ "$restart_port_selection" = true ]; then
-                                    break
-                                fi
-                            done
-                        ;;
-                        * )
-                            echo "Skipping port ${port_number}"
-                        ;;
-                    esac
-                else
-                    echo -e "${RED}Please enter a valid number between 1 and 65535.${NC}"
-                fi
-            done
+                        # If canceled, go back to port number input
+                        if [ "$restart_port_selection" = true ]; then
+                            break
+                        fi
+                    done
+                    ;;
+                * )
+                    echo "Skipping port ${port_number}"
+                    ;;
+                esac
+            else
+                echo -e "${RED}Please enter a valid number between 1 and 65535.${NC}"
+            fi
+        done
         ;;
-        * )
-            log "true" "Skipping custom ports"
+    * )
+        log "true" "Skipping custom ports"
         ;;
     esac
 
-    if ! sudo grep -q "^IPV6[[:blank:]]*=[[:blank:]]*" "$UFW_FILE"; then
+    if grep -q "^IPV6[[:blank:]]*=[[:blank:]]*yes" "$UFW_FILE"; then
         read -p "Do you want to disable IPV6 for UFW? (Y/n): " disable_ipv6
         case "$disable_ipv6" in
-            [Yy]*)
+        [Yy]* | "" )
             backup_file "$UFW_FILE"
             sudo sed -i "s/^IPV6=.*/IPV6=no/" "$UFW_FILE" || log "true" "Failed to disable IPV6 for UFW"
             CHANGED_FILES=("$UFW_FILE")
@@ -567,6 +633,27 @@ setup_firewall() {
         esac
     fi
 
+    if [ -f "$NFT_FILE" ]; then
+        sudo truncate -s 0 "$NFT_FILE" || handle_error "Failed to delete lines in $NFT_FILE"
+    else
+        sudo touch $NFT_FILE || handle_error "Failed to create $NFT_FILE"
+    fi
+
+    nft_modules=(
+        ip_tables
+        iptable_filter
+        iptable_nat
+        ip6_tables
+        nf_conntrack
+        nf_defrag_ipv4
+        nf_defrag_ipv6
+    )
+    add_header "Netfilter Modules" "$NFT_FILE"
+    printf "%s\n" "${nft_modules[@]}" | sudo tee -a $NFT_FILE > /dev/null || handle_error "Failed to add modules to $NFT_FILE"
+    add_footer "Netfilter Modules" "$NFT_FILE"
+
+    update_changed_files "$NFT_FILE"
+    
     sudo ufw logging on || handle_error "Failed to enable UFW logging"
     sudo ufw --force enable || handle_error "Failed to enable UFW"
     log "true" "Firewall configured and enabled"
@@ -577,13 +664,31 @@ setup_fail2ban() {
     log "true" "Installing and Configuring Fail2Ban..."
     local config_file="$FAIL2BAN_FILE"
 
-    if ! dpkg -l | grep -q "rsyslog"; then
-        log "false" "Syslog is required by Fail2ban. Installing..."
-        install_package "rsyslog"
-    fi
+    local default_config=(
+        "[DEFAULT]"
+        "allowipv6 = no"
+        "maxretry = 5"
+        "bantime = 3600"
+        "findtime = 600"
+        "mta = sendmail"
+        "sendername = Fail2Ban"
+        "destemail = $EMAIL"
+    )
+
+    local sshd_config=(
+        ""
+        "[sshd]"
+        "enabled = true"
+        "port = ssh,sftp"
+        "backend = %(sshd_backend)s"
+    )
 
     if ! dpkg -l | grep -q "fail2ban"; then
         install_package "fail2ban"
+        if ! dpkg -l | grep -q "rsyslog"; then
+            log "false" "Syslog is required by Fail2ban. Installing..."
+            install_package "rsyslog"
+        fi
     else
         log "false" "Fail2Ban is already installed. Resetting..."
         sudo systemctl stop fail2ban || handle_error "Failed to stop Fail2Ban service"
@@ -592,12 +697,12 @@ setup_fail2ban() {
         backup_file "$FAIL2BAN_FILE"
     fi
 
-    sudo cp /etc/fail2ban/jail.conf "$FAIL2BAN_FILE" || handle_error "Failed to create Fail2Ban local config"
-    sudo sed -i "s/bantime  = 10m/bantime  = 30m/" "$FAIL2BAN_FILE" || handle_error "Failed to set Fail2Ban bantime"
-    sudo sed -i "s/maxretry = 5/maxretry = 3/" "$FAIL2BAN_FILE" || handle_error "Failed to set Fail2Ban maxretry"
-    sudo sed -i '/^DEFAULT/a\allowipv6 = no\nbantime = 3600\nfindtime = 600\nmaxretry = 5' "$FAIL2BAN_FILE" || handle_error "Failed to set Fail2Ban disable ipv6"
-    echo -e "\n[sshd]\nenabled = true\nport = ssh,sftp\nlogpath = %(sshd_log)s\nbackend = %(sshd_backend)s" | sudo tee -a "$FAIL2BAN_FILE" > /dev/null || handle_error "Failed to set Fail2Ban sshd log"
-
+    add_header "Fail2Ban" "$FAIL2BAN_FILE"
+    printf "%s\n" "${default_config[@]}" | sudo tee -a "$FAIL2BAN_FILE" || handle_error "Failed to add default config to $FAIL2BAN_FILE"
+    printf "%s\n" "${sshd_config[@]}" | sudo tee -a "$FAIL2BAN_FILE" || handle_error "Failed to add sshd config to $FAIL2BAN_FILE"
+    add_footer "Fail2Ban" "$FAIL2BAN_FILE"
+    sudo chmod 640 "/etc/fail2ban/*.conf"
+    sudo chmod 640 "/etc/fail2ban/*.local"
     sudo systemctl enable fail2ban || handle_error "Failed to enable Fail2Ban service"
     sudo systemctl start fail2ban || handle_error "Failed to start Fail2Ban service"
     CHANGED_FILES+=("$FAIL2BAN_FILE")
@@ -624,13 +729,13 @@ setup_clamav() {
 setup_apparmor() {
     log "true" "Setting up AppArmor..."
 
-    if ! command -v apparmor_status &> /dev/null; then
+    if ! command -v apparmor_status &>/dev/null; then
         install_package "apparmor"
     else
         log "false" "AppArmor is already installed. Changing apparmor to enforced..."
     fi
 
-    if ! command -v aa-enforce &> /dev/null; then
+    if ! command -v aa-enforce &>/dev/null; then
         log "true" "apparmor-utils not found. Installing..."
         install_package "apparmor-utils"
     fi
@@ -646,7 +751,7 @@ setup_apparmor() {
 # Function to install Chrony
 setup_chrony() {
     log "true" "Setting up Chrony..."
-    if ! command -v chronyc &> /dev/null; then
+    if ! command -v chronyc &>/dev/null; then
         install_package "chrony"
         sudo systemctl enable chrony || handle_error "Failed to enable Chrony service"
         log "true" "Chrony setup complete."
@@ -659,7 +764,7 @@ setup_chrony() {
 setup_aide() {
     log "true" "Setting up AIDE..."
     if ! dpkg -l | grep -q "aide"; then
-        install_package "aide"
+        install_package "aide" "aide-common"
         sudo aideinit || handle_error "Failed to initialise AIDE database"
         sudo mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db || handle_error "Failed to move AIDE database"
     else
@@ -667,6 +772,8 @@ setup_aide() {
         sudo aide -c /etc/aide/aide.conf --init || handle_error "Failed to initialise AIDE database"
         sudo mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db || handle_error "Failed to move AIDE database"
     fi
+    sudo sed -i "s/^MAILTO=.*/#&/" "$AIDE_FILE" || handle_error "Failed to update email for aide"
+    echo "MAILTO=$EMAIL" | sudo tee -a "$AIDE_FILE" >/dev/null || handle_error "Failed to update email for aide"
     log "true" "AIDE setup is complete"
 }
 
@@ -724,22 +831,31 @@ setup_auditd() {
     )
 
     for rule in "${audit_rules[@]}"; do
-        echo "$rule" | sudo tee -a /etc/audit/rules.d/audit.rules > /dev/null || handle_error "Failed to add audit rule: $rule"
+        echo "$rule" | sudo tee -a /etc/audit/rules.d/audit.rules >/dev/null || handle_error "Failed to add audit rule: $rule"
     done
+    
     update_changed_files "/etc/audit/rules.d/audit.rules"
+    sudo sed -i "s/^action_mail_acct.*/action_mail_acct = $EMAIL/" /etc/audit/auditd.conf || handle_error "Failed to update email in auditd.conf"
     sudo systemctl enable auditd || handle_error "Failed to enable auditd service"
     sudo systemctl start auditd || handle_error "Failed to start auditd service"
     log "true" "Auditd is installed, rules configured and auditd started"
 }
 
-# Setup Rkhunter for rootkit scanning
-setup_rkhunter() {
-    if ! dpkg -l | grep -q "rkhunter"; then
-        install_package "rkhunter"
+# Setup ChkRootKit for rootkit scanning
+setup_chkrootkit() {
+    if ! dpkg -l | grep -q "chkrootkit"; then
+        install_package "chkrootkit"
+        sudo sed -i "s/^MAILTO.*/MAILTO=\"$EMAIL\"/" "$CHKROOTKIT_FILE" || handle_error "Failed to update email address for chkrootkit alerts"
     else
-        log "false" "Rkhunter is already installed"
+        log "false" "ChkRootKit is already installed"
     fi
-    log "true" "Rkhunter setup is complete"
+    
+    if ! grep -q -w "RUN_DAILY=\"true\"" "$CHKROOTKIT_FILE"; then
+        sudo sed -i "s/^RUN_DAILY=\"true\"" "$CHKROOTKIT_FILE" || handle_error "Failed to set chkrootkit to run daily"
+    fi
+    
+    sudo chmod 640 "$CHKROOTKIT_FILE"
+    log "true" "ChkRootKit setup is complete"
 }
 
 # Function to configure sysctl
@@ -747,7 +863,7 @@ configure_sysctl() {
     log "true" "Configuring kernel hardening settings..."
     local context="Kernel Hardening"
     local sysctl_config=(
-        "dev.tty.ldisc_autoload=0"
+        "dev.tty.ldisc_autoload = 0"
         "fs.file-max = 65535"
         "fs.protected_fifos=2"
         "fs.suid_dumpable = 0"
@@ -759,7 +875,7 @@ configure_sysctl() {
         "kernel.perf_event_paranoid = 2"
         "kernel.pid_max = 65536"
         "kernel.randomize_va_space = 2"
-        "kernel.sysrq=0"
+        "kernel.sysrq = 0"
         "kernel.unprivileged_bpf_disabled = 1"
         "kernel.yama.ptrace_scope = 1"
         "net.core.bpf_jit_harden = 2"
@@ -791,22 +907,29 @@ configure_sysctl() {
 
     # Remove old config from /etc/sysctl.conf and delete cis_config file from /etc/sysctl.d
     remove_old_config "$context" "$SYSCTL_FILE"
+    sudo rm "$CUSTOM_SYSCTL_FILE"
 
-    # Add system hardening settings to sysctl.conf
+    # Add header to sysctl.conf
     add_header "$context" "$SYSCTL_FILE"
+    add_header "$context" "$CUSTOM_SYSCTL_FILE"
+    
     for setting in "${sysctl_config[@]}"; do
         if [[ "$setting" =~ ^[a-zA-Z0-9._-]+[[:blank:]]*=[[:blank:]]*[0-9]+$ ]]; then
-            local key=${setting%% = *}
+            local key=${setting%%=*}
             if sudo grep -q -E "^${key}\b" "$SYSCTL_FILE" && ! sudo grep -q -E "^#.*${key}\b" "$SYSCTL_FILE"; then
                 sudo sed -i -e "/^[[:space:]\xc2\xa0]*${key}\b/s/^/#&/" "$SYSCTL_FILE" || handle_error "Failed to comment out existing $key"
                 log "Commented out existing ${key} in $SYSCTL_FILE"
             fi
             echo -e "$setting" | sudo tee -a "$SYSCTL_FILE"
+            echo -e "$setting" | sudo tee -a "$CUSTOM_SYSCTL_FILE"
         else
             echo "Bad systctl parameter - skipping $setting"
         fi
     done
+    
+    # Add footer to sysctl.conf
     add_footer "$context" "$SYSCTL_FILE"
+    add_footer "$context" "$CUSTOM_SYSCTL_FILE"
 
     # Apply settings
     sudo sysctl -p || handle_error "Failed to apply sysctl changes. Please check $SYSCTL_FILE"
@@ -832,7 +955,7 @@ configure_ssh() {
         "AllowStreamLocalForwarding no"
         "AllowTcpForwarding no"
         "AllowUsers *"
-        "Banner none"
+        "Banner /etc/ssh/ssh-banner"
         "Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr"
         "ClientAliveCountMax 2"
         "ClientAliveInterval 300"
@@ -841,12 +964,12 @@ configure_ssh() {
         "GSSAPIKeyExchange no"
         "IgnoreRhosts yes"
         "KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256"
+        "KbdInteractiveAuthentication yes"
         "LoginGraceTime 120"
         "LogLevel INFO"
         "MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
         "MaxAuthTries 3"
-        "MaxSessions 10"
-        "MaxSessions 2"
+        "MaxSessions 3"
         "MaxStartups 10:30:100"
         "PermitEmptyPasswords no"
         "PermitRootLogin no"
@@ -886,15 +1009,15 @@ configure_ssh() {
     add_header "$context" "$SSHD_FILE"
     add_header "$context" "$CUSTOM_SSHD_FILE"
     for setting in "${settings[@]}"; do
-        local key=${setting%% = *}
+        local key=${setting%% *}
         if sudo grep -q -E "^${key}\b" "$SSHD_FILE" && ! sudo grep -q -E "^#.*${key}\b" "$SSHD_FILE"; then
             sudo sed -i -e "/^[[:space:]\xc2\xa0]*${key}\b/s/^/#&/" "$SSHD_FILE" || handle_error "Failed to comment out existing $key"
-            log "Commented out existing ${key} in $SYSCTL_FILE"
+            log "true" "Commented out existing ${key} in $SYSCTL_FILE"
         fi
         # Add location of custom_config file in /etc/ssh/sshd_config
-        echo "$setting" | sudo tee -a "$SSHD_FILE" > /dev/null || handle_error "Failed to append $setting to $SSHD_FILE"
+        echo "$setting" | sudo tee -a "$SSHD_FILE" >/dev/null || handle_error "Failed to append $setting to $SSHD_FILE"
         # Add new settings to 99-cis_hardening.conf to override settings in sshd_config
-        echo "$setting" | sudo tee -a "$CUSTOM_SSHD_FILE" > /dev/null || handle_error "Failed to append $setting to $CUSTOM_SSHD_FILE"
+        echo "$setting" | sudo tee -a "$CUSTOM_SSHD_FILE" >/dev/null || handle_error "Failed to append $setting to $CUSTOM_SSHD_FILE"
     done
     add_footer "$context" "$SSHD_FILE"
     add_footer "$context" "$CUSTOM_SSHD_FILE"
@@ -908,7 +1031,7 @@ configure_ssh() {
 
 # Function to fix file and directory permissions
 apply_file_permissions() {
-    log "true" "Applying restrictive permissions on /var/log files..."
+    log "true" "Securing file permissions..."
     local logfiles=(
         "/var/log/cis_hardening.log"
         "/var/log/wtmp"
@@ -927,7 +1050,7 @@ apply_file_permissions() {
         fi
     done
 
-    log "true" "Restricting permissions on senstive system files & directories"
+    log "true" "Securing permissions on senstive system files & directories"
 
     local sysfiles=(
         "/etc/hosts"
@@ -935,25 +1058,25 @@ apply_file_permissions() {
         "/etc/group"
     )
 
-    for sysfile in "${sysfiles[@]}"; do
-        local fileperm=$(stat -c "%a" $sysfile)
-        local fileowner=$(stat -c "%U:%G" $sysfile)
+    for file in "${sysfiles[@]}"; do
+        [[ -f "$file" ]] || { log "false" "$file not found. Skipping file..."; continue; }
+        local fileperm=$(stat -c "%a" $file)
+        local fileowner=$(stat -c "%U:%G" $file)
         if [ $fileperm -ne 644 ]; then
-            log "true" "Incorrect file permission $fileperm for $sysfile. Changing to 644"
-            sudo chmod 644 $(readlink -e $sysfile) || handle_error "Failed to apply 644 permission on $sysfile"
-            log "true" "File permission 644 applied to $sysfile"
-        else
-            log "true" "$sysfile permission $fileperm is correct"
+            log "true" "Incorrect file permission $fileperm for $file. Changing to 644"
+            sudo chmod 644 $(readlink -e $file) || handle_error "Failed to apply 644 permission on $file"
+            log "true" "Set 644 permissions to $file"
         fi
 
         if [ $fileowner != "root:root" ]; then
-            log "true" "Incorrect owner $fileowner for $sysfile. Changing ownership to root:root"
-            sudo chown root:root $(readlink -e $sysfile) || handle_error "Failed to correct ownership of $sysfile"
-            log "true" "Corrected ownership of $sysfile to root:root"
-        else
-            log "true" "$sysfile ownership $fileowner is correct"
+            log "true" "Incorrect owner $fileowner for $file. Changing ownership to root:root"
+            sudo chown root:root $(readlink -e $file) || handle_error "Failed to correct ownership of $file"
+            log "true" "Set ownership to root:root on $file"
         fi
     done
+
+    # Ensure correct permissions for /etc/sudoers.d
+    sudo chmod -R 440 /etc/sudoers.d && sudo chown -R root:root /etc/sudoers.d || handle_error "Failed to set sudoers.d permissions"
 
     log "true" "Setting umask 077 to all users"
 
@@ -961,20 +1084,21 @@ apply_file_permissions() {
         sudo sed -i "s/^umask.*/# &/" /etc/profile || handle_error "Failed to comment existing umask configuration in /etc/profile"
     fi
     echo -e "\n# CIS Hardening\numask 077" | sudo tee -a /etc/profile || handle_error "Failed to add umask 077 to /etc/profile"
+
     CHANGED_FILES+=("/etc/profile")
     log "true" "Added umask 077 to /etc/profile"
 
     if sudo grep -q "^umask" /etc/bash.bashrc; then
         sudo sed -i "s/^umask.*/# &/" /etc/bash.bashrc || handle_error "Failed to add umask 077 to /etc/bash.bashrc"
     fi
-    echo -e "\n# CIS Hardening\numask 077" | sudo tee -a /etc/bash.bashrc > /dev/null || handle_error "Failed to add umask to /etc/bash.bashrc"
+    echo -e "\n# CIS Hardening\numask 077" | sudo tee -a /etc/bash.bashrc >/dev/null || handle_error "Failed to add umask to /etc/bash.bashrc"
     CHANGED_FILES+=("/etc/bash.bashrc")
     log "true" "Added umask 077 to /etc/bash.bashrc"
 
     if sudo grep -q "^UMASK" /etc/login.defs; then
         sudo sed -i "s/^UMASK.*/UMASK 077/" /etc/login.defs || handle_error "Failed to add umask 077 to /etc/login.defs"
     fi
-    echo -e "\n# CIS Hardening\nUMASK 077" | sudo tee -a /etc/login.defs > /dev/null || handle_error "Failed to add umask to /etc/login.defs"
+    echo -e "\n# CIS Hardening\nUMASK 077" | sudo tee -a /etc/login.defs >/dev/null || handle_error "Failed to add umask to /etc/login.defs"
     CHANGED_FILES+=("/etc/login.defs")
     log "true" "Added umask 077 to login.defs"
 
@@ -982,11 +1106,16 @@ apply_file_permissions() {
         if sudo grep -q "^umask" /etc/profile.d/cis_hardening.sh; then
             sudo sed -i "s/^umask.*/umask 077/" /etc/profile.d/cis_hardening.sh || handle_error "Failed to add umask 077 to /etc/profile.d/cis_hardening.sh"
         else
-            echo -e "\n# CIS Hardening\numask 077" | sudo tee -a /etc/profile.d/cis_hardening.sh > /dev/null || handle_error "Failed to add umask to /etc/profile.d/cis_hardening.sh"
+            echo -e "\n# CIS Hardening\numask 077" | sudo tee -a /etc/profile.d/cis_hardening.sh >/dev/null || handle_error "Failed to add umask to /etc/profile.d/cis_hardening.sh"
         fi
     else
-        echo -e "\n# CIS Hardening\numask 077" | sudo tee -a /etc/profile.d/cis_hardening.sh > /dev/null || handle_error "Failed to add umask to /etc/profile.d/cis_hardening.sh"
+        echo -e "\n# CIS Hardening\numask 077" | sudo tee -a /etc/profile.d/cis_hardening.sh >/dev/null || handle_error "Failed to add umask to /etc/profile.d/cis_hardening.sh"
     fi
+
+    # User can see only his processes
+    sudo sed -i "s/^proc.*/#&/" /etc/fstab || handle_error "Failed to comment out proc in /etc/fstab"
+    echo "proc    /proc    proc    defaults,hidepid=2    0    0" | sudo tee -a /etc/fstab >/dev/null || handle_error "Failed to add proc settings to /etc/fstab"
+
     CHANGED_FILES+=("/etc/profile.d/cis_hardening.sh")
     log "true" "Added umask 077 to profile.d/cis_hardening.sh"
 }
@@ -1018,7 +1147,7 @@ disable_root() {
     if sudo grep -q "^PermitRootLogin" /etc/ssh/sshd_config; then
         sudo sed -i "s/^PermitRootLogin.*/PermitRootLogin no/" /etc/ssh/sshd_config || handle_error "Failed to disable root SSH login in sshd_config"
     else
-        echo "PermitRootLogin no" | sudo tee -a /etc/ssh/sshd_config > /dev/null || handle_error "Failed to add PermitRootLogin no to sshd_config"
+        echo "PermitRootLogin no" | sudo tee -a /etc/ssh/sshd_config >/dev/null || handle_error "Failed to add PermitRootLogin no to sshd_config"
     fi
 
     # Restart SSH service to apply changes
@@ -1032,7 +1161,7 @@ limit_su() {
     local current_user=$(logname)
     local pattern="auth[[:space:]]+required[[:space:]]+pam_wheel\.so"
     log "true" "Limiting su to only wheel members..."
-    if ! getent group "wheel" > /dev/null; then
+    if ! getent group "wheel" >/dev/null; then
         log "true" "wheel group not found. Adding group..."
         sudo groupadd --system wheel || handle_error "Failed to add wheel group"
         sudo usermod -aG wheel "$current_user" || handle_error "Failed to add $current_user to wheel. No changes made"
@@ -1048,7 +1177,7 @@ limit_su() {
 
     backup_file "/etc/pam.d/su"
     sudo sed -i "/^auth[[:space:]]*required[[:space:]]*pam_wheel\.so/s/^/# /" /etc/pam.d/su || handle_error "Failed to modify /etc/pam.d/su"
-    echo -e "\n# Limiting su to wheel members\nauth required pam_wheel.so use_uid" | sudo tee -a /etc/pam.d/su > /dev/null || handle_error "Failed to apply su to wheel members only"
+    echo -e "\n# Limiting su to wheel members\nauth required pam_wheel.so use_uid" | sudo tee -a /etc/pam.d/su >/dev/null || handle_error "Failed to apply su to wheel members only"
     log "true" "$current_user is added to wheel. su is now limited to wheel members"
 }
 
@@ -1074,7 +1203,7 @@ configure_password() {
     fi
 
     if sudo grep -q "# Enforce strong passwords - Start" $pam_config_file; then
-        sudo sed -i '/^# Enforce strong passwords - Start/,/^# Enforce strong passwords - End/d' "$pam_config_file"  || handle_error "Failed to delete previous configuration in $pam_config_file"
+        sudo sed -i '/^# Enforce strong passwords - Start/,/^# Enforce strong passwords - End/d' "$pam_config_file" || handle_error "Failed to delete previous configuration in $pam_config_file"
         sudo sed -i -z 's/\n*[[:space:]]*$/d/' "$pam_config_file" || handle_error "Failed to delete trailing empty lines in $pam_config_file"
     fi
 
@@ -1084,13 +1213,13 @@ configure_password() {
     # Comment out existing pam_pwquality settings
     sudo sed -i '/^[[:space:]]*password.*pam_pwquality/s/^/#/' $pam_config_file
     # Add password rules to pw_quality config file
-    echo -e "minlen = 10\ndcredit = -1\nucredit = -1\nocredit = -1\nlcredit = -1\minclass=4" | sudo tee -a $pw_config_file > /dev/null || handle_error "Failed to write to $pw_config_file"
+    echo -e "minlen = 10\ndcredit = -1\nucredit = -1\nocredit = -1\nlcredit = -1\minclass=4" | sudo tee -a $pw_config_file >/dev/null || handle_error "Failed to write to $pw_config_file"
     # Add matching pw_quality rules for pam_pwquality.so
-    echo "password requisite pam_pwquality.so retry=3 minlen=10 minclass=4 enforce_for_root" | sudo tee -a $pam_config_file > /dev/null || handle_error "Failed to modify pam_pwquality.so in $pam_config_file"
+    echo "password requisite pam_pwquality.so retry=3 minlen=10 minclass=4 enforce_for_root" | sudo tee -a $pam_config_file >/dev/null || handle_error "Failed to modify pam_pwquality.so in $pam_config_file"
     # Comment existing password rules for pam_unix.so
     sudo sed -i '/^[[:space:]]*password.*pam_unix.so/s/^/#/' $pam_config_file
     # Add password rules pam_unix.so
-    echo "password [success=1 default=ignore] pam_unix.so obscure use_authtok try_first_pass yescrypt rounds=8" | sudo tee -a $pam_config_file > /dev/null || handle_error "Failed to modify pam_unix.so in $pam_config_file"
+    echo "password [success=1 default=ignore] pam_unix.so obscure use_authtok try_first_pass yescrypt rounds=8" | sudo tee -a $pam_config_file >/dev/null || handle_error "Failed to modify pam_unix.so in $pam_config_file"
     # Add cis hardening footers to config files
     echo "# Enforce strong passwords - End" | sudo tee -a $pam_config_file || handle_error "Failed to write header to $pam_config_file"
     echo "# Enforce strong passwords - End" | sudo tee -a $pw_config_file || handle_error "Failed to write header to $pw_config_file"
@@ -1119,7 +1248,7 @@ secure_boot() {
         # Add or modify kernel parameters
         local kernel_params="audit=1 net.ipv4.conf.all.rp_filter=1 net.ipv4.conf.all.accept_redirects=0 net.ipv4.conf.all.send_redirects=0"
 
-        if command -v apparmor_status &> /dev/null; then
+        if command -v apparmor_status &>/dev/null; then
             kernel_params+=" apparmor=1 security=apparmor"
         fi
 
@@ -1130,9 +1259,9 @@ secure_boot() {
         sudo sed -i "s/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX=\"$kernel_params\"/" /etc/default/grub || handle_error "Failed to modify kernel parameters"
 
         # Update GRUB
-        if command -v update-grub &> /dev/null; then
+        if command -v update-grub &>/dev/null; then
             sudo update-grub || handle_error "Failed to update GRUB"
-            elif command -v grub2-mkconfig &> /dev/null; then
+        elif command -v grub2-mkconfig &>/dev/null; then
             sudo grub2-mkconfig -o /boot/grub2/grub.cfg || handle_error "Failed to update GRUB"
         else
             log "false" "Neither update-grub nor grub2-mkconfig found. Please update GRUB manually."
@@ -1142,6 +1271,7 @@ secure_boot() {
     else
         log "false" "/etc/default/grub not found. Skipping kernel parameter modifications."
     fi
+    
     update_changed_files "/etc/default/grub"
     log "true" "Boot settings secured"
 }
@@ -1149,20 +1279,21 @@ secure_boot() {
 # Function to setup Google 2FA
 setup_2fa() {
     log "true" "Setting up Google 2FA Authentication"
+    
     if ! dpkg -l | grep -q "libpam-google-authenticator"; then
         install_package "libpam-google-authenticator"
         backup_file "/etc/pam.d/sshd"
-        echo -e "\n# Google 2FA Authentication" | sudo tee -a /etc/pam.d/sshd > /dev/null
-        echo "auth required pam_google_authenticator.so nullok" | sudo tee -a /etc/pam.d/sshd > /dev/null || handle_error "Failed to add Google Authenticator to /etc/pam.d/sshd"
-        backup_file "/etc/ssh/sshd_config"
+        echo -e "\n# Google 2FA Authentication" | sudo tee -a /etc/pam.d/sshd >/dev/null
+        echo "auth required pam_google_authenticator.so nullok" | sudo tee -a /etc/pam.d/sshd >/dev/null || handle_error "Failed to add Google Authenticator to /etc/pam.d/sshd"
         if ! grep -q "^ChallengeResponseAuthentication" /etc/ssh/sshd_config; then
-            echo "ChallengeResponseAuthentication yes" | sudo tee -a /etc/ssh/sshd_config > /dev/null || handle_error "Failed to enable ChallengeResponseAuthentication"
+            echo "ChallengeResponseAuthentication yes" | sudo tee -a /etc/ssh/sshd_config >/dev/null || handle_error "Failed to enable ChallengeResponseAuthentication"
         else
             sudo sed -i "s/^ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/" /etc/ssh/sshd_config || handle_error "Failed to modify ChallengeResponseAuthentication"
         fi
     else
         log "false" "Google 2FA is already installed on your system"
     fi
+    
     update_changed_files "/etc/pam.d/sshd"
     update_changed_files "/etc/ssh/sshd_config"
     log "true" "Google 2FA authentication is enabled. Please run google-authenticator in your next login to enable 2FA"
@@ -1171,7 +1302,7 @@ setup_2fa() {
 # Function for miscellaneous settings to remove system info from motd, issue
 apply_misc() {
     if dpkg -l | grep -q "arpwatch"; then
-        log "Arp monitoring software not found. Installing arpwatch..."
+        log "true" "Arp monitoring software not found. Installing arpwatch..."
         install_package "arpwatch"
     fi
 
@@ -1182,29 +1313,41 @@ apply_misc() {
     sudo sed -i "s/.*pam_motd.so.*/#&/" /etc/pam.d/sshd || handle_error "Failed to disable motd for ssh users"
 
     log "true" "Removing sensitive information for /etc/issue and /etc/issue.net"
-    sudo sed -i "s/^/#/" /etc/issue || handle_error "Failed to update /etc/issue"
-    echo "This system is hardened using Aureum CIS Hardening!\nAuthorized users only. All activity may be monitored and reported." | sudo tee -a /etc/issue || handle_error "Failed to update /etc/issue"
+    sudo sed -i 'd' /etc/issue || handle_error "Failed to delete all lines from /etc/issue"
+    sudo sed -i 'd' /etc/issue.net || handle_error "Failed to delete all lines from /etc/issue.net"
+
+    local issue=(
+        "******************************************************************************"
+        "   WARNING: Unauthorized access to this system is strictly prohibited."
+        "   All activities on this system are logged and monitored. By logging in,"
+        "   you acknowledge that you are authorized to access this system and agree"
+        "   to abide by all relevant policies and regulations."
+        "   Unauthorized users will be prosecuted to the fullest extent of the law."
+        "******************************************************************************"
+        ""
+    )
+    for msg in "${issue[@]}"; do
+        echo -e "$msg" | sudo tee -a /etc/issue || handle_error "Failed to update /etc/issue"
+        echo -e "$msg" | sudo tee -a /etc/issue.net || handle_error "Failed to update /etc/issue.net"
+        echo -e "$msg" | sudo tee -a /etc/ssh/ssh-banner || handle_error "Failed to update /etc/ssh/ssh-banner"
+    done
+
     log "true" "Removed sensitive information for /etc/issue and /etc/issue.net"
-
-    log "true" "Non-informative message added to /etc/issue.net"
-    sudo sed -i "s/^/#/" /etc/issue.net || handle_error "Failed to update /etc/issue.net"
-    echo "This system is hardened using Aureum CIS Hardening!\nAuthorized users only. All activity may be monitored and reported." | sudo tee -a /etc/issue.net || handle_error "Failed to update /etc/issue.net"
-    log "true" "Non-informative message added to /etc/issue.net"
-
     log "true" "Restricting unauthorised access to /etc/issue and /etc/issue.net"
     sudo chown root:root $(readlink -e /etc/issue)
     sudo chmod u-x,go-wx $(readlink -e /etc/issue)
     log "true" "Restricted unauthorised access to /etc/issue and /etc/issue.net"
 
     log "true" "Enabling peristent storage for journald"
-    echo "Storage=persistent" | sudo tee -a /etc/systemd/journald.conf > /dev/null || handle_error "Failed to enable persistent storage for journald"
+    echo "Storage=persistent" | sudo tee -a /etc/systemd/journald.conf >/dev/null || handle_error "Failed to enable persistent storage for journald"
     log "true" "Enabled persistent storage for journald"
 
     log "true" "Disabling core dumps"
-    echo -e "soft\tcore\t0\nhard\tcore\0" | sudo tee -a /etc/security/limits.conf
+    echo -e "*\tsoft\tcore\t0\n*\thard\tcore\t0" | sudo tee -a /etc/security/limits.conf
 
     update_changed_files "/etc/issue"
     update_changed_files "/etc/issue.net"
+    update_changed_files "/etc/ssh/ssh-banner"
     update_changed_files "/etc/systemd/journald.conf"
     update_changed_files "/etc/security/limits.conf"
 
@@ -1221,25 +1364,25 @@ enable_updates() {
 
 setup_lynis() {
     if ! command -v "git"; then
-        log "Git not found. Installing..."
+        log "true" "Git not found. Installing..."
         install_package "git"
     fi
-    log "Downloading Lynis into $(pwd)"
+    log "true" "Downloading Lynis into $(pwd)"
     git clone "https://github.com/CISOfy/lynis"
-    log "Lynis is downloaded to $(pwd). You can run 'lynis audit system' to audit your system"
-    log "Visit https://github.com/CISOfy/lynis for details"
+    log "true" "Lynis is downloaded to $(pwd). You can run 'lynis audit system' to audit your system"
+    log "true" "Visit https://github.com/CISOfy/lynis for details"
 }
 
 is_dryrun() {
-    echo "Running in dry-run mode, no changes will be made."
     if [ "$dry_run" -eq 1 ]; then
+        echo "Running in dry-run mode, no changes will be made."
         echo "dry run called"
         local userid=$(logname)
         echo -e "$userid"
         local usergroup=$(id -ng $userid)
         echo -e "$usergroup"
-		local user_dir="/home/$userid"
-		sudo mkdir -p "$user_dir/cis_dryrun"
+        local user_dir="/home/$userid"
+        sudo mkdir -p "$user_dir/cis_dryrun"
         local dryrun_dir="/$user_dir/cis_dryrun"
         sudo cp "/etc/ssh/sshd_config" $dryrun_dir
         sudo cp "/etc/pam.d/sshd" $dryrun_dir
@@ -1276,13 +1419,13 @@ main() {
     update_system
 
     clear
-     echo -e "${BLUE}"
+    echo -e "${BLUE}"
     print_centered "-" "-"
     print_centered "${GOLD}${BOLD}WELCOME TO AUREUM NETWORK${NORMAL}${NC}"
     print_centered "${LTGRAY}${ITALIC}:: ENHANCED CIS HARDENING SCRIPT 1.0 ::${NORMAL}${NC}"
     print_centered "${DARKGRAY}${COPYRIGHT} All rights reserved 2025${NORMAL}${BLUE}"
     print_centered "-" "-"
-    echo -e "${NC}" > /dev/null
+    echo -e "${NC}" >/dev/null
 
     check_permissions
     check_requirements
@@ -1297,6 +1440,29 @@ main() {
     echo -e "${NC}${NORMAL}\n"
     sleep 1
 
+    local answer="Y"
+    echo "${CYAN}Securty events sent to $EMAIL by default in this system${NC}"
+    read -p "${YELLOW}Do you want to change it? [Y/n]:${NC} " answer
+    answer=$(echo "$answer" | xargs)
+    case $answer in
+    [Yy]* | "")
+        while true; do
+            read -p "Enter email address: " EMAIL
+            if [[ $EMAIL =~ $EMAIL_REGEX ]]; then
+                log "true" "All security events will be reported to ${CYAN}$EMAIL.${NC}"
+                if ask_question "${YELLOW}Confirm $EMAIL? ${NC}" "Y"; then
+                    break
+                fi
+            else
+                echo -e "${RED}Invalid email address. Please try again.${NC}\n"
+            fi
+        done
+        ;;
+    * )
+        echo -e "${CYAN}Leaving default address for reporting security events.${NC}\n"
+        ;;
+    esac
+
     if [ -f "$LOG_FILE" ] >/dev/null 2>&1; then
         local logbackup=$LOG_FILE.$(date +%F_%H%M%S).bak
         sudo cp $LOG_FILE $logbackup || handle_error "Failed to backup cis_hardening.log file"
@@ -1304,6 +1470,7 @@ main() {
         sudo rm $LOG_FILE
     fi
 
+    # Run questionnaire to get user selection
     while true; do
         questionnaire
         show_selection_summary
@@ -1319,11 +1486,18 @@ main() {
         fi
     done
 
-    echo -e "${ITALIC}${YELLOW}The following files have been modified by this script.${NC}${NORMAL}"
-    printf "\t%s\n" "${ITALIC}${MAGENTA}${CHANGED_FILES[@]}${NC}${NORMAL}"
-    echo -e "${YELLOW}Backup copies of the these files are store in ${LTBLUE}/root/cis_hardening${NC}${NORMAL}"
-
-    echo -e "$(tput blink)${BOLD}${RED}Please reboot the system${NC}${NORMAL}"
+    # List all changed files
+    if ! [[ -z ${CHANGED_FILES[@]} ]]; then
+        echo -e "${ITALIC}${YELLOW}The following files have been modified by this script.\n${NC}${NORMAL}"
+        printf "\t%s\n" "${ITALIC}${MAGENTA}${CHANGED_FILES[@]}${NC}${NORMAL}"
+        echo -e "${ITALIC}${YELLOW}\nBackup copies of the these files are store in ${LTBLUE}/root/cis_hardening\n\n${NC}${NORMAL}"
+        log "true" "List of services installed and running"
+        sudo systemctl list-units --type=service --state=running
+    else
+        echo -e "${YELLOW}No files have been changed by this script.\n\n${NC}"
+    fi
+    
+    echo -e "$(tput blink)${BOLD}${RED}\nPlease reboot the system\n${NC}${NORMAL}"
 }
 
 # Run the main function
