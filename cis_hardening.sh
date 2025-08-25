@@ -932,7 +932,7 @@ configure_sysctl() {
     add_footer "$context" "$CUSTOM_SYSCTL_FILE"
 
     # Apply settings
-    sudo sysctl -p || handle_error "Failed to apply sysctl changes. Please check $SYSCTL_FILE"
+    sudo sysctl --system || handle_error "Failed to apply sysctl changes. Please check $SYSCTL_FILE"
 
     # Add to changed config files to list
     update_changed_files "$SYSCTL_FILE"
