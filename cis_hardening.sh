@@ -463,7 +463,7 @@ disable_ipv6() {
         fi
     done
     add_footer "$context" "$SYSCTL_FILE"
-    sudo sysctl -p || handle_error "Failed to apply sysctl changes"
+    sudo sysctl --system || handle_error "Failed to apply sysctl changes"
     update_changed_files "$SYSCTL_FILE"
     log "true" "IPv6 has been disabled"
 }
