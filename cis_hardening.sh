@@ -1327,9 +1327,9 @@ apply_misc() {
         ""
     )
     for msg in "${issue[@]}"; do
-        echo -e "$msg" | sudo tee -a /etc/issue || handle_error "Failed to update /etc/issue"
-        echo -e "$msg" | sudo tee -a /etc/issue.net || handle_error "Failed to update /etc/issue.net"
-        echo -e "$msg" | sudo tee -a /etc/ssh/ssh-banner || handle_error "Failed to update /etc/ssh/ssh-banner"
+        echo -e "$msg" | sudo tee -a /etc/issue > /dev/null || handle_error "Failed to update /etc/issue"
+        echo -e "$msg" | sudo tee -a /etc/issue.net /dev/null || handle_error "Failed to update /etc/issue.net"
+        echo -e "$msg" | sudo tee -a /etc/ssh/ssh-banner /dev/null || handle_error "Failed to update /etc/ssh/ssh-banner"
     done
 
     log "true" "Removed sensitive information for /etc/issue and /etc/issue.net"
