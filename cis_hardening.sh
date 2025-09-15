@@ -1213,7 +1213,7 @@ configure_password() {
     # Comment out existing pam_pwquality settings
     sudo sed -i '/^[[:space:]]*password.*pam_pwquality/s/^/#/' $pam_config_file
     # Add password rules to pw_quality config file
-    echo -e "minlen = 10\ndcredit = -1\nucredit = -1\nocredit = -1\nlcredit = -1\minclass=4" | sudo tee -a $pw_config_file >/dev/null || handle_error "Failed to write to $pw_config_file"
+    echo -e "minlen = 10\ndcredit = -1\nucredit = -1\nocredit = -1\nlcredit = -1\nminclass=4" | sudo tee -a $pw_config_file >/dev/null || handle_error "Failed to write to $pw_config_file"
     # Add matching pw_quality rules for pam_pwquality.so
     echo "password requisite pam_pwquality.so retry=3 minlen=10 minclass=4 enforce_for_root" | sudo tee -a $pam_config_file >/dev/null || handle_error "Failed to modify pam_pwquality.so in $pam_config_file"
     # Comment existing password rules for pam_unix.so
