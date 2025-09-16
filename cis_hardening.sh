@@ -1196,33 +1196,27 @@ configure_password() {
     fi
     log "true" "Configuring system to enforce strong passwords"
 
-    # Remove previous hardening configurations
+    # Remove previous hardening configurations from /etc/security/pwquality.conf
     if sudo grep -q "# Enforce strong passwords - Start" $pw_config_file; then
         sudo sed -i '/^# Enforce strong passwords - Start/,/^# Enforce strong passwords - End/d' "$pw_config_file" || handle_error "Failed to delete previous configuration in $pw_config_file"
         sudo sed -i -z 's/\n*[[:space:]]*$/d/' "$pw_config_file" || handle_error "Failed to delete trailing empty lines in $pw_config_file"
     fi
 
+    # Remove previous hardening configurations from /etc/pam.d/common-passwor
     if sudo grep -q "# Enforce strong passwords - Start" $pam_config_file; then
         sudo sed -i '/^# Enforce strong passwords - Start/,/^# Enforce strong passwords - End/d' "$pam_config_file" || handle_error "Failed to delete previous configuration in $pam_config_file"
         sudo sed -i -z 's/\n*[[:space:]]*$/d/' "$pam_config_file" || handle_error "Failed to delete trailing empty lines in $pam_config_file"
     fi
-
-    # Add cis hardening headers to config files
-    echo "# Enforce strong passwords - Start" | sudo tee -a $pw_config_file || handle_error "Failed to write header to $pw_config_file"
-    echo "# Enforce strong passwords - Start" | sudo tee -a $pam_config_file || handle_error "Failed to write header to $pam_config_file"
-    # Comment out existing pam_pwquality settings
-    sudo sed -i '/^[[:space:]]*password.*pam_pwquality/s/^/#/' $pam_config_file
+       
     # Add password rules to pw_quality config file
     echo -e "minlen = 10\ndcredit = -1\nucredit = -1\nocredit = -1\nlcredit = -1\nminclass=4" | sudo tee -a $pw_config_file >/dev/null || handle_error "Failed to write to $pw_config_file"
+    
     # Add matching pw_quality rules for pam_pwquality.so
-    echo "password requisite pam_pwquality.so retry=3 minlen=10 minclass=4 enforce_for_root" | sudo tee -a $pam_config_file >/dev/null || handle_error "Failed to modify pam_pwquality.so in $pam_config_file"
-    # Comment existing password rules for pam_unix.so
-    sudo sed -i '/^[[:space:]]*password.*pam_unix.so/s/^/#/' $pam_config_file
+    sed -i 's/^.*[[:space:]]*password.*pam_pwquality.*/password\trequisite\tpam_pwquality.so\tretry=3/' pam_config_file || handle_error "Failed to modify pam_pwquality.so in $pam_config_file"
+
     # Add password rules pam_unix.so
-    echo "password [success=1 default=ignore] pam_unix.so obscure use_authtok try_first_pass yescrypt rounds=8" | sudo tee -a $pam_config_file >/dev/null || handle_error "Failed to modify pam_unix.so in $pam_config_file"
-    # Add cis hardening footers to config files
-    echo "# Enforce strong passwords - End" | sudo tee -a $pam_config_file || handle_error "Failed to write header to $pam_config_file"
-    echo "# Enforce strong passwords - End" | sudo tee -a $pw_config_file || handle_error "Failed to write header to $pw_config_file"
+    sed -i 's/^.*[[:space:]]*password.*pam_unix.so.*/password\t[success=1 default=ignore]\tpam_unix.so\tobscure\tuse_authtok\ttry_first_pass\tyescrypt/' $pam_config_file || handle_error "Failed to modify pam_unix.so in $pam_config_file"
+     
     update_changed_files "$pw_config_file"
     log "true" "Strong passwords are now enforced using pam_pwquality"
 }
