@@ -1214,7 +1214,7 @@ configure_password() {
     echo -e "minlen = 10\ndcredit = -1\nucredit = -1\nocredit = -1\nlcredit = -1\nminclass=4" | sudo tee -a $pw_config_file >/dev/null || handle_error "Failed to write to $pw_config_file"
     
     # Add matching pw_quality rules for pam_pwquality.so
-    sudo sed -i 's/^.*[[:space:]]*password.*pam_pwquality.*/password\trequisite\tpam_pwquality.so\tretry=3/' pam_config_file || handle_error "Failed to modify pam_pwquality.so in $pam_config_file"
+    sudo sed -i 's/^.*[[:space:]]*password.*pam_pwquality.*/password\trequisite\tpam_pwquality.so\tretry=3/' $pam_config_file || handle_error "Failed to modify pam_pwquality.so in $pam_config_file"
 
     # Add password rules pam_unix.so
     sudo sed -i 's/^.*[[:space:]]*password.*pam_unix.so.*/password\t[success=1 default=ignore]\tpam_unix.so\tobscure\tuse_authtok\ttry_first_pass\tyescrypt/' $pam_config_file || handle_error "Failed to modify pam_unix.so in $pam_config_file"
